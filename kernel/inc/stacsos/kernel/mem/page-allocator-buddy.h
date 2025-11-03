@@ -31,9 +31,9 @@ private:
 	static const int LastOrder = 16;
 
 	page *free_list_[LastOrder + 1];
-	u64 total_free_;
+	u64 total_free_ = 0; // set to 0 to initialise process correctly
 
-	constexpr u64 pages_per_block(int order) const { return 1 << order; }
+	constexpr u64 pages_per_block(int order) const { return 1ULL << order; }
 
 	constexpr bool block_aligned(int order, u64 pfn) { return !(pfn & (pages_per_block(order) - 1)); }
 
@@ -42,5 +42,8 @@ private:
 
 	void split_block(int order, page &block_start);
 	void merge_buddies(int order, page &buddy);
+
+	// added helper method
+	bool is_in_free_list(int order, page *p) const;
 };
 } // namespace stacsos::kernel::mem
