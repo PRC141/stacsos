@@ -61,21 +61,25 @@ void page_allocator_buddy::dump() const
  * @param page_count The number of pages in the range.
  */
 void page_allocator_buddy::insert_free_pages(page &range_start, u64 page_count) {
-	page* cur = &range_start;
-	u64 remaining = page_count; 
+	page* cur = &range_start; // set pointer to current pages that needs to be inserted
+	u64 remaining = page_count; // set counter of number of remaining pages to be inserted
 
+	// while there are still pages to be inserted
 	while (remaining > 0) {
-		// find largest order to which cur is aligned and block fits within remaining pages
+		// find the largest order o such that:
+    	// cur is aligned to a 2^o-page boundary
+    	// a 2^o-page block fits entirely within remaining
 		int order = LastOrder;
 		while (order > 0 && (!block_aligned(order, cur->pfn()) || pages_per_block(order) > remaining)) {
 			order--;
 		}
 
-		// call free pages method to insert and also coalesce upwards
+		// call free pages method to insert the block at found order
+		// and coalesce upwards to ensure correct structure and so avoid fragmentation
 		// also takes cares of tracking total_free
 		free_pages(*cur, order);
 
-		// move by block size
+		// move by block size by moving cur and updating remaining, if there are still more pages to insert
 		const u64 step = pages_per_block(order);
 		cur += step;
 		remaining -= step;
@@ -139,7 +143,7 @@ void page_allocator_buddy::remove_free_block(int order, page &block_start)
 }
 
 /**
- * @brief
+ * @brief splits a block into two block of order - 1
  *
  * ** You are required to implement this function **
  * @param order
@@ -153,7 +157,7 @@ void page_allocator_buddy::split_block(int order, page &block_start) {
 	// remove parent block
 	remove_free_block(order, block_start);
 
-	// separate into 2
+	// separate into 2 blocks (left and right) of order - 1
 	int lower = order - 1;
 	u64 half = pages_per_block(lower);
 	const u64 left_pfn  = block_start.pfn();
@@ -167,29 +171,32 @@ void page_allocator_buddy::split_block(int order, page &block_start) {
 }
 
 /**
- * @brief
+ * @brief given one buddy, if other is free, merge them together and 
+ *.       insert into order + 1 free list
  *
  * @param order
  * @param buddy
  */
 void page_allocator_buddy::merge_buddies(int order, page &buddy) {
 	// check order is in range and alignment
-	assert(order >= 0 && order <= LastOrder);
+	assert(order >= 0 && order < LastOrder);
 	assert(block_aligned(order, buddy.pfn()));
 
 	u64 base = pages_per_block(order);
 	u64 pfn  = buddy.pfn();
-	u64 other_pfn = pfn ^ base;
+	u64 other_pfn = pfn ^ base; // calculate other buddy's pfn
+	page &other  = page::get_from_pfn(other_pfn); // find other buddy descriptor
 
-	// find other buddy descriptor
-	page &other  = page::get_from_pfn(other_pfn);
+	// safety check that both buddies are free
+	assert(is_in_free_list(order, &buddy));
+	assert(is_in_free_list(order, &other));
 
 	// remove both buddies from their order's free list
 	remove_free_block(order, buddy);
 	remove_free_block(order, other);
 
-	// calculate merged block start
-	u64 merged_base_pfn = pfn & ~((u64)base);
+	// calculate merged block start as smallest pfn out of the buddies
+	u64 merged_base_pfn = (pfn < other_pfn) ? pfn : other_pfn;
 	page &merged = page::get_from_pfn(merged_base_pfn);
 
 	// insert merged block into next order free list
@@ -197,9 +204,9 @@ void page_allocator_buddy::merge_buddies(int order, page &buddy) {
 }
 
 /**
- * @brief
+ * @brief returns free block of pages of given order or null pointer
  *
- * ** You are required to implement this function **
+ * 
  * @param order
  * @param flags
  * @return page*
@@ -210,8 +217,8 @@ page *page_allocator_buddy::allocate_pages(int order, page_allocation_flags flag
 		return nullptr;
 	}
 
-	// find the first non-empty free list at or above order
-	for (int o = order; o <= LastOrder; ++o) {
+	// find the first non-empty free block at or above order
+	for (int o = order; o <= LastOrder; o++) {
 		if (free_list_[o]) {
 			// take first free block
 			page *block = free_list_[o];
@@ -219,33 +226,44 @@ page *page_allocator_buddy::allocate_pages(int order, page_allocation_flags flag
 			u64 base_pfn = block->pfn();
 
 			// if it's too big, split down until we reach order
-			int cur = o;
-			while (cur > order) {
-				// split into order - 1
-				--cur;
-            	u64 right_pfn = base_pfn + pages_per_block(cur);
+			int cur_order = o;
+			while (cur_order > order) {
+				// split into cur_order - 1
+				cur_order--;
+
+				// find right half and insert it back into free list of its order
+            	u64 right_pfn = base_pfn + pages_per_block(cur_order);
             	page &right = page::get_from_pfn(right_pfn);
-            	insert_free_block(cur, right);
-            	// keep left (base_pfn) for next iteration
+            	insert_free_block(cur_order, right);
+            	// to keep left hald (base_pfn) for next iteration
 			}
 
 			// track free pages
 			total_free_ -= pages_per_block(order);
+			// result block at base_pfn
+			page &res = page::get_from_pfn(base_pfn);
 
 			// if flags given, zero fill
-			page &ret = page::get_from_pfn(base_pfn);
 			if ((flags & page_allocation_flags::zero) == page_allocation_flags::zero) {
-				memops::pzero(ret.base_address_ptr(), pages_per_block(order));
+				memops::pzero(res.base_address_ptr(), pages_per_block(order));
 			}
-			return &ret;
+			// return result block
+			return &res;
 		}
 	}
-	// not enough memory for given order
+	// if not enough memory for given order, return null pointer
 	return nullptr;
 }
 
-// helper method
-bool page_allocator_buddy::is_in_free_list(int order, page *p) const {
+/**
+ * @brief helper method which goes through free list of given order,
+ *        to check if given page is in it and so free
+ *
+ * @param order
+ * @param page
+ * @return bool
+ */
+bool page_allocator_buddy::is_in_free_list(int order, page *p) {
 	// check order in range
 	assert(order >= 0 && order <= LastOrder);
 
@@ -253,18 +271,20 @@ bool page_allocator_buddy::is_in_free_list(int order, page *p) const {
     page *cur = free_list_[order];
     while (cur) {
         if (cur == p) {
+			// page found
 			return true;
 		} 
 		// move pointer
         cur = ((page_metadata*)cur->base_address_ptr())->next_free;
     }
+	// page not found
     return false;
 }
 
 /**
- * @brief
- *
- * ** You are required to implement this function **
+ * @brief inserts freed block into free list and 
+ *        merges upwards until buddy isn´t free or LastOrder is reached
+ * 
  * @param block_start
  * @param order
  */
@@ -273,34 +293,33 @@ void page_allocator_buddy::free_pages(page &block_start, int order) {
 	assert(order >= 0 && order <= LastOrder);
 	assert(block_aligned(order, block_start.pfn()));
 
-	// insert freed block into its order free list and track
+	// insert freed block into its order free list and track total_free_
 	insert_free_block(order, block_start);
 	total_free_ += pages_per_block(order);
 
-	// merge upwards while buddy is also free
+	// begin to merge upwards while buddy is also free
 	int cur_order = order;
 	page *cur_block = &block_start;
-
 	while (cur_order < LastOrder) {
 		u64 base = pages_per_block(cur_order);
 		u64 pfn  = cur_block->pfn();
-		u64 buddy_pfn = pfn ^ base;
-
-		page *buddy = &page::get_from_pfn(buddy_pfn);
+		u64 buddy_pfn = pfn ^ base; // calculate other buddy's pfn
+		page *buddy = &page::get_from_pfn(buddy_pfn); // find other buddy descriptor
 
 		// if buddy isn't free, stop merging
 		if (!is_in_free_list(cur_order, buddy)) {
 			break;
 		}
 
-		// if free, merge buddy blocks
+		// if free, merge buddy blocks using merge_buddies method
 		// this removes them from cur_order free list and inserts merged into cur_order + 1 free list
 		merge_buddies(cur_order, *cur_block);
 
-		// calculate merged pfn and repeat from there
-		u64 merged_base_pfn = pfn & ~((u64)base);
+		// calculate merged block start as smallest pfn out of the buddies
+		u64 merged_base_pfn = (pfn < buddy_pfn) ? pfn : buddy_pfn;
 		page *merged = &page::get_from_pfn(merged_base_pfn);
 
+		// repeat process from there
 		cur_block = merged;
 		cur_order++;
 	}

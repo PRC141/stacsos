@@ -44,6 +44,6 @@ private:
 	void merge_buddies(int order, page &buddy);
 
 	// added helper method
-	bool is_in_free_list(int order, page *p) const;
+	bool is_in_free_list(int order, page *p);
 };
 } // namespace stacsos::kernel::mem
