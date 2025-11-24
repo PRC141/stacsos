@@ -160,7 +160,12 @@ int main(const char *cmdline) {
             console::get().writef("%s\n", e.name);
 		} else { // if it is, print file type, name and size
 			char type_char = (e.type == 1) ? 'D' : 'F'; // as type is defined as 0 for file and 1 for directory
-			console::get().writef("[%c] %s %lu\n", type_char, e.name, e.size);
+			
+			if (e.type == 1) { // if directory, don't print size
+				console::get().writef("[%c] %s\n", type_char, e.name);
+			} else {
+				console::get().writef("[%c] %s %lu\n", type_char, e.name, e.size);
+			}
 		}
 	}
 	return 0;
