@@ -59,6 +59,19 @@ public:
 	virtual shared_ptr<file> open() override { return shared_ptr<file>(new fat_file((fat_filesystem &)fs(), cluster_, data_size_)); }
 	virtual fs_node *mkdir(const char *name) override;
 
+	// P3: public helper methods to be able to access file properties for listdir system call
+
+	// load and get children list
+	list<fat_node*> &children() {
+		load();
+		return children_;
+	}
+
+	// get file size 
+	u64 data_size() const {
+		return data_size_;
+	}
+
 protected:
 	virtual fs_node *resolve_child(const string &name) override;
 

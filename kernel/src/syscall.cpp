@@ -17,6 +17,7 @@
 #include <stacsos/kernel/sched/sleeper.h>
 #include <stacsos/kernel/sched/thread.h>
 #include <stacsos/syscalls.h>
+#include <stacsos/kernel/fs/fat.h>
 
 using namespace stacsos;
 using namespace stacsos::kernel;
@@ -180,6 +181,73 @@ extern "C" syscall_result handle_syscall(syscall_numbers index, u64 arg0, u64 ar
 	case syscall_numbers::poweroff: {
 		pio::outw(0x604, 0x2000);
 		return syscall_result { syscall_result_code::ok, 0 };
+	}
+
+	// P3: listdir system call handler in kernel
+	// checks if given path is valid (is direcctory) and 
+	// returns directory's entries (with their properties) to user space
+	case syscall_numbers::listdir: {
+		// get provided file path from first argument
+		const char *path = (const char *)arg0;
+
+		// look up the given node in the VFS to check if it exists
+		auto node = vfs::get().lookup(path);
+		if (!node) { // if it doesn't, return error
+			return syscall_result { syscall_result_code::not_found, 0 };
+		}
+
+		// check if node is a directory (cannot be file)
+		if (node->kind() != fs_node_kind::directory) {
+			return syscall_result { syscall_result_code::not_supported, 0 };
+		}
+
+		// having guaranteed that the node is an exisiting directory,
+		// can cast to a fat_node, as we are also guaranteed FAT filesystem usage
+		auto *fat_dir = static_cast<fat_node *>(node);
+
+		// get the list of children of directory using helper method
+		auto &children = fat_dir->children();
+
+		// interpret second argument as pointer to list of directory entry structs,
+		// where their properties will be stored
+		auto *out_entries = reinterpret_cast<directory_entry *>(arg1);
+
+		// third argument is limit of directory entries
+		u64 max_entries = arg2;
+
+		// counter to track actual number of entries
+		u64 count = 0;
+
+		// iterate over children list, making each a directory entry struct 
+		// with its properties (name, size, type)
+		for (auto child : children) {
+			// check if entries limit is passed
+			if (count >= max_entries) {
+				break;
+			}
+
+			// temporary directory entry struct
+			directory_entry entry{};
+			
+			// appropriately copy child name 
+			const char *name = child->name().c_str();
+			if (!name) { // fallback: if name null, name will be empty string
+				name = "";
+			}
+			memops::strncpy(entry.name, name, sizeof(entry.name) - 1); // use given stacsos string copy method
+			entry.name[sizeof(entry.name) - 1] = '\0'; // manually ensure null-termination
+
+			// get entry's size and type (0 for file or 1 for directory)
+			entry.size = child->data_size();
+			entry.type = (child->kind() == fs_node_kind::directory) ? 1 : 0;
+
+			// add entry to list and increment counter
+			out_entries[count] = entry;
+			count++;
+		}
+
+		// syscall successfull, return number of entries in data field
+		return syscall_result { syscall_result_code::ok, count };
 	}
 
 	default:

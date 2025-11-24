@@ -76,6 +76,15 @@ public:
 		return alloc_result { r.code, (void *)r.data };
 	}
 
+	// P3: listdir system call wrapper
+	// arg0: given path of directory to list
+	// arg1: pointer to list of directory entry structs
+	// arg2: number of directory entries limit
+	static rw_result listdir(const char *path, directory_entry *buffer, u64 max_entries) {
+		auto r = syscall3(syscall_numbers::listdir, (u64)path, (u64)buffer, max_entries);
+		return rw_result { r.code, r.data };
+	}
+
 	static syscall_result start_process(const char *path, const char *args) { return syscall2(syscall_numbers::start_process, (u64)path, (u64)args); }
 	static syscall_result wait_process(u64 id) { return syscall1(syscall_numbers::wait_for_process, id); }
 
