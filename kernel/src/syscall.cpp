@@ -218,6 +218,15 @@ extern "C" syscall_result handle_syscall(syscall_numbers index, u64 arg0, u64 ar
 		// counter to track actual number of entries
 		u64 count = 0;
 
+		// PART OF OPTIMISATION: 2 PHASE API
+		// first call handler which just returns number of entries
+		if (out_entries == nullptr && max_entries == 0) {
+			for (auto child : children) {
+				count++;
+			}
+			return syscall_result { syscall_result_code::ok, count };
+		}
+
 		// iterate over children list, making each a directory entry struct 
 		// with its properties (name, size, type)
 		for (auto child : children) {

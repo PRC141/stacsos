@@ -32,7 +32,7 @@ int main(const char *cmdline) {
 
 	// skip any leading spaces
 	while (*cmdline == ' ') {
-		++cmdline;
+		cmdline++;
 	}
 
 	// parse flags, allowed:
@@ -41,7 +41,7 @@ int main(const char *cmdline) {
 	// "-s" sort by size
 	// "-ln" and "-ls" combinations accepted 
 	if (*cmdline == '-') {
-		++cmdline;
+		cmdline++;
 		
 		char flag1 = 0;
 		char flag2 = 0;
@@ -86,7 +86,7 @@ int main(const char *cmdline) {
 
 	// skip spaces before given file path
 	while (*cmdline == ' ') {
-		++cmdline;
+		cmdline++;
 	}
 
     // if no path given, print accepted usage
@@ -98,35 +98,72 @@ int main(const char *cmdline) {
     // extracted path from args
 	const char *path = cmdline;
 
-	// set limit on number of directory entries to ensure buffer isn't overflowed
-	const u64 max_entries = 128;
+	// OPTIMISATION: 2 PHASE API
 
-	// initialise list to store the directory entry structs
-	directory_entry entries[max_entries];
-
-    // make the system call
-	auto res = syscalls::listdir(path, entries, max_entries);
+	// first call to get how many entries are there from kernel
+	auto res1 = syscalls::listdir(path, nullptr, 0);
 
     // analyse possible error results
-	if (res.code == syscall_result_code::not_found) {
+	if (res1.code == syscall_result_code::not_found) {
 		console::get().writef("error: path '%s' not found\n", path);
 		return 1;
-	} else if (res.code == syscall_result_code::not_supported) {
+	} else if (res1.code == syscall_result_code::not_supported) {
 		console::get().writef("error: path '%s' is not a directory\n", path);
 		return 1;
-	} else if (res.code != syscall_result_code::ok) {
+	} else if (res1.code != syscall_result_code::ok) {
 		console::get().writef("error: listdir failed for '%s'\n", path);
 		return 1;
 	}
 
 	// get number of entries
-	u64 count = res.length;
+	u64 count = res1.length;
+
+	// knowing number of entries, only have to allocate exactly enough 
+	// space for all directory entries in user memory
+	// (instead of having static limit)
+	u64 bytes = count * sizeof(directory_entry);
+	auto alloc = syscalls::alloc_mem(bytes);
+
+	// check allocation successful
+	if (alloc.code != syscall_result_code::ok || alloc.ptr == nullptr) {
+		console::get().write("error: memory allocation for directory entries failed\n");
+		return 1;
+	}
+
+	// interpret pointer to the allocated array of directory entry structs
+	auto *entries = reinterpret_cast<directory_entry *>(alloc.ptr);
+
+	// second call to actually get the directory entries into the buffer
+	auto res2 = syscalls::listdir(path, entries, count);
+
+	// check call sussessful
+	if (res2.code != syscall_result_code::ok) {
+		console::get().writef("error: listdir failed for '%s'\n", path);
+		return 1;
+	}
+
+	// number of entries actually written
+	// if works correctly should be equal to count
+	u64 actual = res2.length;
+
+	// calculate the biggest name length for proper allignment in output
+	u64 max_name_len = 0;
+	if (long_mode) {
+		for (u64 i = 0; i < actual; i++) {
+			auto &e = entries[i];
+
+			u64 name_len = memops::strlen(e.name);
+			if (name_len > max_name_len) {
+				max_name_len = name_len;
+			}
+		}
+	}
 
 	// sort by name or size if flags given
 	// using selection sort O(n^2)
 	if (mode == sort_mode::name) {
-		for (u64 i = 0; i + 1 < count; ++i) {
-			for (u64 j = i + 1; j < count; ++j) {
+		for (u64 i = 0; i + 1 < actual; i++) {
+			for (u64 j = i + 1; j < actual; j++) {
 				if (memops::strcmp(entries[i].name, entries[j].name) > 0) {
 					directory_entry tmp = entries[i];
 					entries[i] = entries[j];
@@ -135,8 +172,8 @@ int main(const char *cmdline) {
 			}
 		}
 	} else if (mode == sort_mode::size) {
-		for (u64 i = 0; i + 1 < count; ++i) {
-			for (u64 j = i + 1; j < count; ++j) {
+		for (u64 i = 0; i + 1 < actual; i++) {
+			for (u64 j = i + 1; j < actual; j++) {
 				if (entries[i].size > entries[j].size) { // smallest to biggest
 					directory_entry tmp = entries[i];
 					entries[i] = entries[j];
@@ -147,7 +184,7 @@ int main(const char *cmdline) {
 	}
 
     // iterate over list of entries, printing each with appropriate info (depending on flag)
-	for (u64 i = 0; i < count; ++i) {
+	for (u64 i = 0; i < actual; i++) {
 		auto &e = entries[i];
 
 		// skip entries "." and ".." (current and parent dirs)
@@ -158,13 +195,31 @@ int main(const char *cmdline) {
 		// if "-l" isn't given, just print file names
 		if (!long_mode) {
             console::get().writef("%s\n", e.name);
-		} else { // if it is, print file type, name and size
+		} else { // if it is, print file type, name and size nicely alligned
 			char type_char = (e.type == 1) ? 'D' : 'F'; // as type is defined as 0 for file and 1 for directory
 			
-			if (e.type == 1) { // if directory, don't print size
-				console::get().writef("[%c] %s\n", type_char, e.name);
-			} else {
-				console::get().writef("[%c] %s %lu\n", type_char, e.name, e.size);
+			// first just write type and name
+			console::get().writef("[%c] %s", type_char, e.name);
+
+			if (e.type == 1) { // if dir, no size
+				console::get().write("\n");
+			} else { // if file, first pad with whitespaces, then print size
+				// calculate number of spaces needed 
+				u64 name_len = memops::strlen(e.name);
+				u64 padding = 5; // min distance of 5 spaces
+
+				// padding is difference between max length and this name's length
+				if (max_name_len > name_len) {
+					padding += (max_name_len - name_len);
+				}
+
+				// print calculated number of spaces
+				for (u64 p = 0; p < padding; p++) {
+					console::get().write(" ");
+				}
+
+				// print alligned size
+				console::get().writef("%lu\n", e.size);
 			}
 		}
 	}
